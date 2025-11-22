@@ -1,37 +1,123 @@
-# Main configuration for DSM-5 NLI Binary Classification
-defaults:
-  - model: bert_base
-  - training: default
-  - hpo: optuna
-  - _self_
+# ============================================================================
+# Main Configuration for DSM-5 NLI Binary Classification
+# ============================================================================
+# This is the root configuration file using Hydra's composition pattern.
+# It combines model, training, and HPO configs into a unified configuration.
+#
+# Usage:
+#   python -m dsm5_nli.cli train
+#   python -m dsm5_nli.cli train model.dropout=0.2 training.learning_rate=3e-5
+#
+# Hydra allows runtime overrides of any parameter via CLI arguments.
+# ============================================================================
 
-# Experiment settings
+defaults:
+  - model: bert_base      # Model architecture config (bert_base.yaml)
+  - training: default     # Training hyperparameters (default.yaml)
+  - hpo: optuna          # HPO search space (optuna.yaml)
+  - _self_               # This file's settings override the above
+
+# ============================================================================
+# EXPERIMENT SETTINGS
+# ============================================================================
+# experiment_name: Unique identifier for this experimental run
+#   - Used for MLflow experiment naming
+#   - Used for output directory naming
+#   - Best practice: descriptive name like "dsm5_criteria_matching_v2"
 experiment_name: dsm5_criteria_matching
+
+# seed: Random seed for reproducibility
+#   - Controls all random operations (Python random, NumPy, PyTorch, Transformers)
+#   - Same seed + same config = identical results (with deterministic=true)
+#   - Typical values: 42, 0, 2023
 seed: 42
 
-# Data paths
+# ============================================================================
+# DATA CONFIGURATION
+# ============================================================================
+# Paths to dataset files and tokenization settings
 data:
+  # posts_csv: Social media posts with post_id and text columns
   posts_csv: data/redsm5/redsm5_posts.csv
+
+  # annotations_csv: Ground truth annotations linking posts to DSM-5 criteria
+  #   Expected columns: post_id, criterion_id, status (1=match, 0=no match)
   annotations_csv: data/redsm5/redsm5_annotations.csv
+
+  # criteria_json: DSM-5 Major Depressive Disorder criteria definitions
+  #   Format: {"criterion_id": "criterion text description", ...}
   criteria_json: data/DSM5/MDD_Criteira.json
+
+  # max_length: Maximum sequence length for BERT tokenization
+  #   - Sequences longer than this are truncated
+  #   - Format: [CLS] post [SEP] criterion [SEP] with padding to max_length
+  #   - BERT max: 512 tokens (including special tokens)
+  #   - Trade-off: longer = more context but slower training
   max_length: 512
 
-# K-fold cross-validation
+# ============================================================================
+# K-FOLD CROSS-VALIDATION
+# ============================================================================
+# Stratified K-fold with post-level grouping to prevent data leakage
 kfold:
+  # n_splits: Number of folds for cross-validation
+  #   - 5 is standard (80% train / 20% val per fold)
+  #   - Higher values = more reliable metrics but slower training
+  #   - Each fold trains a separate model
   n_splits: 5
+
+  # group_by_post: CRITICAL for preventing data leakage
+  #   - true: All pairs from same post_id stay in same fold (recommended)
+  #   - false: Random split (WILL LEAK - same post in train and val)
+  #   - See training/kfold.py for detailed explanation
   group_by_post: true
 
-# MLflow tracking
+# ============================================================================
+# MLFLOW EXPERIMENT TRACKING
+# ============================================================================
+# MLflow logs metrics, parameters, models, and artifacts for each run
 mlflow:
-  tracking_uri: "file:./mlruns"  # Change to postgresql://user:password@localhost/mlflow for PostgreSQL
+  # tracking_uri: Where to store MLflow data
+  #   - "file:./mlruns" - Local file storage (default, no setup required)
+  #   - "postgresql://user:pass@host/db" - PostgreSQL backend (production)
+  #   - "sqlite:///mlflow.db" - SQLite backend (alternative)
+  tracking_uri: "file:./mlruns"
+
+  # experiment_name: MLflow experiment name (references ${experiment_name} above)
+  #   - All runs from this config go under this experiment
+  #   - Allows grouping related runs together
   experiment_name: ${experiment_name}
 
-# Reproducibility
+# ============================================================================
+# REPRODUCIBILITY SETTINGS
+# ============================================================================
+# Controls for deterministic training and result replication
 reproducibility:
+  # seed: Random seed (references ${seed} defined above)
   seed: ${seed}
-  deterministic: true
-  tf32: true  # Enable TF32 for RTX 5090 (2-3x speedup)
 
-# Paths
+  # deterministic: Enable deterministic algorithms
+  #   - true: Exact same results every run (may be slower)
+  #   - false: Non-deterministic (faster but results vary slightly)
+  deterministic: true
+
+  # tf32: Enable TensorFloat-32 operations on RTX 5090
+  #   - true: 2-3x matmul speedup with minimal accuracy loss (recommended)
+  #   - false: Full FP32 precision (slower but slightly more accurate)
+  #   - Only affects Ampere+ GPUs (RTX 30xx, 40xx, 50xx)
+  #   - Trade-off: slight non-determinism for major speed gain
+  tf32: true
+
+# ============================================================================
+# OUTPUT PATHS
+# ============================================================================
+# Directories for saving models, checkpoints, and artifacts
+# output_dir: Root directory for all experiment outputs
+#   - Uses ${experiment_name} for unique naming
+#   - Structure: outputs/dsm5_criteria_matching/
 output_dir: outputs/${experiment_name}
+
+# checkpoint_dir: Model checkpoint storage location
+#   - Saves best model per fold: fold_0_best.pt, fold_1_best.pt, etc.
+#   - Includes model state_dict, optimizer state, and config
 checkpoint_dir: ${output_dir}/checkpoints

@@ -1,21 +1,122 @@
-# Training configuration
+# ============================================================================
+# Training Hyperparameters Configuration
+# ============================================================================
+# Default training settings optimized for RTX 5090 with BERT-base-uncased
+# All parameters can be overridden via CLI or HPO
+# ============================================================================
+
+# ============================================================================
+# CORE TRAINING HYPERPARAMETERS
+# ============================================================================
+
+# batch_size: Number of samples per training batch
+#   - Default: 32 (balanced speed/memory for RTX 5090)
+#   - Larger = faster training but more memory (try 64, 128)
+#   - Smaller = less memory but slower (try 16, 8)
+#   - RTX 5090 can handle 64+ with BERT-base + BF16
 batch_size: 32
+
+# learning_rate: AdamW learning rate for fine-tuning BERT
+#   - Default: 2e-5 (standard BERT fine-tuning rate)
+#   - Typical range: 1e-5 to 5e-5
+#   - Too high: unstable training, divergence
+#   - Too low: slow convergence, underfitting
+#   - HPO searches this range automatically
 learning_rate: 2e-5
+
+# num_epochs: Number of complete passes through training data
+#   - Default: 10 (sufficient for BERT fine-tuning on small datasets)
+#   - Typical range: 3-10 for fine-tuning
+#   - Monitor validation F1 to detect overfitting
+#   - Early stopping not implemented (trains all epochs)
 num_epochs: 10
+
+# weight_decay: L2 regularization strength for AdamW optimizer
+#   - Default: 0.01 (standard for BERT)
+#   - Prevents overfitting by penalizing large weights
+#   - Typical range: 0.001 to 0.1
+#   - 0 = no regularization (may overfit)
 weight_decay: 0.01
 
-# Optimization settings (RTX 5090)
+# ============================================================================
+# GPU OPTIMIZATION SETTINGS (RTX 5090 SPECIFIC)
+# ============================================================================
+# These settings provide 3-5x overall speedup on Ampere+ GPUs
+# Disable all if training on CPU or older GPUs
 optimization:
-  use_bf16: true          # bfloat16 mixed precision (2x speedup)
-  use_tf32: true          # TF32 operations (2-3x speedup)
-  use_torch_compile: true # JIT compilation (10-20% speedup)
-  fused_adamw: true       # Fused optimizer operations
+  # use_bf16: Enable bfloat16 mixed precision training
+  #   - true: 2x speedup + 50% memory reduction (recommended for RTX 5090)
+  #   - false: Full FP32 precision (slower, more memory)
+  #   - BF16 maintains better numerical stability than FP16
+  #   - Requires Ampere+ GPU (RTX 30xx, 40xx, 50xx)
+  use_bf16: true
 
-# Training settings
+  # use_tf32: Enable TensorFloat-32 matrix operations
+  #   - true: 2-3x matmul speedup with minimal accuracy loss (recommended)
+  #   - false: Standard FP32 operations
+  #   - TF32 rounds FP32 to 10-bit mantissa (vs 23-bit) internally
+  #   - Only affects Ampere+ GPUs, ignored on older hardware
+  #   - Note: Introduces slight non-determinism even with seed set
+  use_tf32: true
+
+  # use_torch_compile: Enable PyTorch 2.0+ JIT compilation
+  #   - true: 10-20% speedup via graph optimization (recommended)
+  #   - false: Eager execution mode
+  #   - First epoch slow (compilation), subsequent epochs faster
+  #   - Requires PyTorch 2.0+
+  #   - May cause issues with dynamic shapes or custom ops
+  use_torch_compile: true
+
+  # fused_adamw: Use fused AdamW optimizer kernel
+  #   - true: 5-10% speedup by fusing optimizer ops (recommended)
+  #   - false: Standard unfused AdamW
+  #   - Requires CUDA and PyTorch built with CUDA support
+  #   - Minimal downside, significant speed gain
+  fused_adamw: true
+
+# ============================================================================
+# ADVANCED TRAINING SETTINGS
+# ============================================================================
+
+# gradient_accumulation_steps: Accumulate gradients over N steps before update
+#   - Default: 1 (update every batch)
+#   - Simulates larger batch size: effective_batch = batch_size * accumulation_steps
+#   - Use when GPU memory limited (e.g., accumulation_steps=2 with batch_size=16 = effective 32)
+#   - Trade-off: slower training but same convergence as larger batch
 gradient_accumulation_steps: 1
+
+# max_grad_norm: Maximum gradient norm for clipping
+#   - Default: 1.0 (standard for BERT)
+#   - Prevents exploding gradients during training
+#   - Clips gradients with L2 norm > max_grad_norm to max_grad_norm
+#   - 0 = no clipping (may cause instability)
+#   - Typical range: 0.5 to 5.0
 max_grad_norm: 1.0
+
+# warmup_ratio: Fraction of training steps for learning rate warmup
+#   - Default: 0.1 (10% of total steps)
+#   - Linearly increases LR from 0 to learning_rate over warmup period
+#   - Then linearly decays to 0 over remaining steps
+#   - Prevents initial instability in BERT fine-tuning
+#   - Typical range: 0.05 to 0.15 (5-15%)
 warmup_ratio: 0.1
 
-# Data loading
+# ============================================================================
+# DATA LOADING SETTINGS
+# ============================================================================
+# Controls for PyTorch DataLoader performance
+
+# num_workers: Number of subprocesses for data loading
+#   - Default: 4 (good balance for most systems)
+#   - Higher = faster data loading but more CPU/memory
+#   - 0 = single-process loading (slow but low overhead)
+#   - Recommended: num_cpu_cores / 2
+#   - Too high may cause slowdown due to GIL contention
 num_workers: 4
+
+# pin_memory: Pin CPU memory for faster GPU transfer
+#   - true: Faster host-to-device transfer (recommended with GPU)
+#   - false: Standard memory allocation
+#   - Only beneficial when training on GPU
+#   - Increases CPU memory usage slightly
 pin_memory: true

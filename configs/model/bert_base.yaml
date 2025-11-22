@@ -1,5 +1,44 @@
-# BERT base model configuration
+# ============================================================================
+# BERT Model Architecture Configuration
+# ============================================================================
+# Defines model architecture and initialization settings
+# Used by models/bert_classifier.py to construct the classification model
+# ============================================================================
+
+# model_name: HuggingFace model identifier
+#   - Default: bert-base-uncased (12-layer, 768-hidden, 12-heads, 110M params)
+#   - Alternatives:
+#     * bert-large-uncased (24-layer, 1024-hidden, 16-heads, 340M params)
+#     * roberta-base (more robust pretraining)
+#     * microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract (medical domain)
+#   - "uncased" = lowercase only (recommended for social media text)
+#   - Model downloaded from HuggingFace Hub on first run
 model_name: bert-base-uncased
+
+# num_labels: Number of output classes for classification head
+#   - Default: 2 (binary classification: match vs no-match)
+#   - For multi-class: set to number of classes (e.g., 3, 5, 10)
+#   - Binary uses CrossEntropyLoss with 2 output logits
 num_labels: 2
+
+# dropout: Dropout probability for classification head
+#   - Default: 0.1 (10% dropout rate, standard for BERT)
+#   - Applied to [CLS] token representation before final linear layer
+#   - Regularization to prevent overfitting
+#   - Range: 0.0 (no dropout) to 0.5 (aggressive)
+#   - Note: BERT encoder layers use fixed 0.1 dropout (not configurable here)
+#   - HPO searches 0.1-0.3 range automatically
 dropout: 0.1
+
+# freeze_bert: Whether to freeze BERT encoder weights during training
+#   - false: Fine-tune all BERT layers (recommended, default)
+#   - true: Only train classification head (faster but lower accuracy)
+#   - Use true when:
+#     * Very small dataset (< 1000 samples)
+#     * Need fast training for experimentation
+#     * Domain closely matches BERT's pretraining data
+#   - Use false when:
+#     * Sufficient data (> 1000 samples)
+#     * Domain-specific language (e.g., medical, social media)
+#     * Maximum accuracy required
 freeze_bert: false

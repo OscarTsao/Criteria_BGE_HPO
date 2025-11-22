@@ -1,37 +1,123 @@
-# Optuna hyperparameter optimization configuration
-n_trials: 50
-storage: sqlite:///optuna.db
-study_name: dsm5_nli_hpo
-direction: maximize  # maximize F1 score
+# ============================================================================
+# Optuna Hyperparameter Optimization Configuration
+# ============================================================================
+# Defines HPO study settings, pruning strategy, and search space
+# Run via: python -m dsm5_nli.cli hpo --n-trials 50
+# ============================================================================
 
-# Pruner configuration
+# ============================================================================
+# OPTUNA STUDY SETTINGS
+# ============================================================================
+
+# n_trials: Number of hyperparameter combinations to evaluate
+#   - Default: 50 (balance exploration vs runtime)
+#   - Each trial runs abbreviated K-fold CV (3 epochs per fold)
+#   - Higher = better hyperparameters but longer runtime
+#   - Typical values: 20-100 for small search spaces
+n_trials: 50
+
+# storage: Database backend for storing trial history
+#   - Default: sqlite:///optuna.db (local SQLite file)
+#   - Alternatives:
+#     * postgresql://user:pass@host/db (production, concurrent studies)
+#     * mysql://user:pass@host/db (production alternative)
+#   - Allows resuming interrupted HPO studies
+#   - Enables parallel optimization across multiple processes
+storage: sqlite:///optuna.db
+
+# study_name: Unique identifier for this optimization study
+#   - Used to group related trials together
+#   - Can resume study with same name: load_if_exists=True
+#   - Best practice: descriptive name like "dsm5_bert_base_v1"
+study_name: dsm5_nli_hpo
+
+# direction: Optimization direction for objective metric
+#   - maximize: For metrics like F1, accuracy, AUC (default)
+#   - minimize: For loss, error rate
+#   - This study maximizes mean F1 across K-fold validation
+direction: maximize
+
+# ============================================================================
+# PRUNING CONFIGURATION
+# ============================================================================
+# Early stopping for unpromising trials to save computation time
 pruner:
+  # type: Pruning algorithm
+  #   - MedianPruner: Stops trials performing worse than median of previous trials
+  #   - More aggressive alternatives: SuccessiveHalvingPruner, HyperbandPruner
   type: MedianPruner
+
+  # n_startup_trials: Number of initial trials to complete before pruning
+  #   - Default: 5 (gather baseline statistics first)
+  #   - Early trials establish median baseline for comparison
+  #   - Higher = more conservative pruning (fewer early stops)
   n_startup_trials: 5
+
+  # n_warmup_steps: Number of steps (folds) before pruning can occur
+  #   - Default: 3 (wait until 3 folds complete)
+  #   - Prevents premature pruning based on first fold's variance
+  #   - With 5 folds total, pruning can occur after fold 3
   n_warmup_steps: 3
+
+  # interval_steps: Check pruning condition every N steps (folds)
+  #   - Default: 1 (check after every fold)
+  #   - Higher = less frequent checks (e.g., 2 = check every 2 folds)
   interval_steps: 1
 
-# Search space
+# ============================================================================
+# HYPERPARAMETER SEARCH SPACE
+# ============================================================================
+# Defines ranges for each hyperparameter to optimize
+# Note: type field is for documentation only (actual sampling in cli.py)
+
 search_space:
+  # learning_rate: AdamW learning rate
+  #   - type: loguniform - samples from log scale (better for orders of magnitude)
+  #   - Range: [1e-5, 5e-5] - standard BERT fine-tuning range
+  #   - Examples: 1.5e-5, 2e-5, 3.5e-5
+  #   - Log scale ensures good coverage of 1e-5, 2e-5, 5e-5
   learning_rate:
     type: loguniform
     low: 1e-5
     high: 5e-5
 
+  # batch_size: Training batch size
+  #   - type: categorical - discrete choices only
+  #   - Choices: [16, 32, 64] - powers of 2 for GPU efficiency
+  #   - 16: Lower memory, slower
+  #   - 32: Balanced (default)
+  #   - 64: Faster but more memory (RTX 5090 can handle)
   batch_size:
     type: categorical
     choices: [16, 32, 64]
 
+  # dropout: Dropout probability for BERT classifier head
+  #   - type: uniform - samples uniformly from range
+  #   - Range: [0.1, 0.3] - typical for BERT fine-tuning
+  #   - Lower = less regularization (may overfit)
+  #   - Higher = more regularization (may underfit)
+  #   - BERT layers use fixed 0.1 dropout (not tuned)
   dropout:
     type: uniform
     low: 0.1
     high: 0.3
 
+  # weight_decay: L2 regularization strength for AdamW
+  #   - type: loguniform - log scale for order of magnitude search
+  #   - Range: [0.001, 0.1] - wider than default 0.01
+  #   - Examples: 0.001, 0.01, 0.05, 0.1
+  #   - Prevents overfitting by penalizing large weights
   weight_decay:
     type: loguniform
     low: 0.001
     high: 0.1
 
+  # warmup_ratio: Fraction of steps for LR warmup
+  #   - type: uniform - linear sampling from range
+  #   - Range: [0.05, 0.15] - 5% to 15% of total steps
+  #   - Lower = shorter warmup (faster convergence, may be unstable)
+  #   - Higher = longer warmup (more stable, slower convergence)
+  #   - Warmup prevents initial instability in BERT fine-tuning
   warmup_ratio:
     type: uniform
     low: 0.05
