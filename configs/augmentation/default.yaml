@@ -15,3 +15,8 @@ type: synonym
 
 # prob: Probability of applying augmentation to a positive sample with evidence
 prob: 0.0
+
+# imbalance_mode: Control which samples are eligible for augmentation
+#   - minority_only: apply to positive/evidence rows only
+#   - all: allow augmentation on any row with evidence text
+imbalance_mode: minority_only

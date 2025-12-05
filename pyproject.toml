@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "criteria-bge-hpo"
 version = "0.1.0"
-description = "DSM-5 Criteria Matching using Natural Language Inference with BGE reranker"
+description = "DSM-5 Criteria Matching using Transformer-based Natural Language Inference"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "CVR Lab 308" }]

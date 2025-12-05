@@ -12,11 +12,11 @@
 # ============================================================================
 
 defaults:
-  - model: bge_reranker   # Model architecture config (bge_reranker.yaml)
-  - training: default     # Training hyperparameters (default.yaml)
-  - augmentation: default # Evidence-span augmentation settings
-  - hpo: pc_ce            # HPO search space (pc_ce.yaml)
-  - _self_                # This file's settings override the above
+  - model: deberta_nli      # Default backbone (DeBERTa-v3-base-mnli-fever-anli with NLI pretraining)
+  - training: default       # Training hyperparameters (default.yaml)
+  - augmentation: default   # Evidence-span augmentation settings
+  - hpo: optuna             # HPO search space (optuna.yaml)
+  - _self_                  # This file's settings override the above
 
 # ============================================================================
 # EXPERIMENT SETTINGS
@@ -39,7 +39,7 @@ seed: 42
 #   - Optional parameters: n_trials (for hpo), fold (for eval)
 command: null
 # n_trials: default number of trials for HPO (can override via CLI or env)
-n_trials: 500
+n_trials: 100
 # fold: target fold for eval command
 fold: 0
 

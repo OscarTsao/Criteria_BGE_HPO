@@ -3,7 +3,7 @@ Command-line interface for DSM-5 NLI Binary Classification.
 
 Usage:
     python -m criteria_bge_hpo.cli train training.num_epochs=100 training.early_stopping_patience=20  # Run K-fold training
-    python -m criteria_bge_hpo.cli hpo --n-trials 500       # Run HPO
+    python -m criteria_bge_hpo.cli hpo --n-trials 100       # Run HPO
     python -m criteria_bge_hpo.cli eval --fold 0            # Evaluate specific fold
 """
 
@@ -11,7 +11,7 @@ import copy
 import os
 import subprocess
 import sys
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import hydra
 from omegaconf import DictConfig
@@ -21,12 +21,14 @@ import mlflow
 import optuna
 from optuna.pruners import MedianPruner
 import numpy as np
+import torch
 from rich.console import Console
 from rich.table import Table
 
 from criteria_bge_hpo.data.preprocessing import load_and_preprocess_data
 from criteria_bge_hpo.data.dataset import DSM5NLIDataset, create_dataloaders
 from criteria_bge_hpo.models.bert_classifier import BERTClassifier
+from criteria_bge_hpo.models.deberta_classifier import DeBERTaClassifier
 from criteria_bge_hpo.training.kfold import (
     create_kfold_splits,
     get_fold_statistics,
@@ -42,6 +44,12 @@ from criteria_bge_hpo.utils.reproducibility import (
     enable_deterministic,
     get_device,
     verify_cuda_setup,
+)
+from criteria_bge_hpo.utils.optimizations import (
+    configure_sdp_backend,
+    resolve_attention_backend,
+    select_amp_dtype,
+    should_use_grad_scaler,
 )
 from criteria_bge_hpo.utils.mlflow_setup import setup_mlflow, log_config, start_run
 from criteria_bge_hpo.utils.visualization import (
@@ -71,6 +79,28 @@ def _resolve_optuna_storage(storage_uri: str) -> str:
     return storage_uri
 
 
+def _build_optimization_settings(config: DictConfig) -> Dict[str, Any]:
+    """Assemble optimization switches (AMP, attention backend, etc.)."""
+    opt_cfg = config.training.optimization
+    amp_dtype = select_amp_dtype(
+        use_bf16=opt_cfg.use_bf16,
+        enable_fp16=opt_cfg.get("enable_fp16_fallback", True),
+    )
+    attn_backend = resolve_attention_backend(opt_cfg.get("attention_backend", "sdpa"))
+    configure_sdp_backend(attn_backend)
+    use_compile = False  # torch.compile explicitly excluded
+
+    return {
+        "amp_dtype": amp_dtype,
+        "use_grad_scaler": should_use_grad_scaler(amp_dtype),
+        "attention_backend": attn_backend,
+        "gradient_checkpointing": opt_cfg.get("gradient_checkpointing", False),
+        "optimizer": opt_cfg.get("optimizer", "adamw_torch_fused"),
+        "non_blocking": config.training.pin_memory and torch.cuda.is_available(),
+        "use_compile": use_compile,
+    }
+
+
 def run_single_fold(
     config: DictConfig,
     pairs_df,
@@ -98,6 +128,7 @@ def run_single_fold(
     console.print(f"\n[bold cyan]Fold {fold + 1}/{config.kfold.n_splits}[/bold cyan]\n")
 
     augment_config = config.get("augmentation", None)
+    optimization_settings = _build_optimization_settings(config)
 
     # Create datasets
     train_dataset = DSM5NLIDataset(
@@ -123,18 +154,48 @@ def run_single_fold(
         batch_size=config.training.batch_size,
         num_workers=config.training.num_workers,
         pin_memory=config.training.pin_memory,
+        persistent_workers=config.training.persistent_workers,
+        bucket_by_length=config.training.bucket_by_length,
+        bucket_size=config.training.bucket_size,
+        seed=config.seed,
     )
 
     # Create model
-    model = BERTClassifier(
-        model_name=config.model.model_name,
-        num_labels=config.model.num_labels,
-        freeze_backbone=config.model.freeze_backbone,
-    )
+    # Detect model type based on model_name
+    model_name_lower = config.model.model_name.lower()
+    if "deberta" in model_name_lower:
+        model = DeBERTaClassifier(
+            model_name=config.model.model_name,
+            num_labels=config.model.num_labels,
+            classifier_head=config.model.get("classifier_head", "linear"),
+            classifier_dropout=config.model.get("classifier_dropout", 0.1),
+            hidden_dropout=config.model.get("hidden_dropout", None),
+            attention_dropout=config.model.get("attention_dropout", None),
+            freeze_backbone=config.model.freeze_backbone,
+            loss_type=config.model.get("loss", {}).get("type", "bce"),
+            focal_gamma=config.model.get("loss", {}).get("focal_gamma", 2.0),
+            focal_alpha=config.model.get("loss", {}).get("focal_alpha", None),
+            attn_implementation=optimization_settings["attention_backend"],
+            gradient_checkpointing=optimization_settings["gradient_checkpointing"],
+            torch_dtype=optimization_settings["amp_dtype"],
+        )
+    else:
+        model = BERTClassifier(
+            model_name=config.model.model_name,
+            num_labels=config.model.num_labels,
+            freeze_backbone=config.model.freeze_backbone,
+            attn_implementation=optimization_settings["attention_backend"],
+            gradient_checkpointing=optimization_settings["gradient_checkpointing"],
+            torch_dtype=optimization_settings["amp_dtype"],
+        )
 
     console.print(
         f"Model parameters: {model.get_num_trainable_params():,} trainable / {model.get_num_total_params():,} total"
     )
+
+    logging_cfg = config.training.get("logging", {}) or {}
+    enable_progress = logging_cfg.get("rich_progress", True)
+    refresh_rate = logging_cfg.get("progress_refresh_per_second", 4)
 
     # Create optimizer and scheduler
     optimizer, scheduler = create_optimizer_and_scheduler(
@@ -145,6 +206,7 @@ def run_single_fold(
         weight_decay=config.training.weight_decay,
         warmup_ratio=config.training.warmup_ratio,
         use_fused=config.training.optimization.fused_adamw,
+        optimizer_type=optimization_settings["optimizer"],
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
     )
 
@@ -157,13 +219,19 @@ def run_single_fold(
         scheduler=scheduler,
         device=device,
         use_bf16=config.training.optimization.use_bf16,
-        use_compile=config.training.optimization.use_torch_compile,
+        amp_dtype=optimization_settings["amp_dtype"],
+        use_grad_scaler=optimization_settings["use_grad_scaler"],
+        use_compile=optimization_settings["use_compile"],
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
         max_grad_norm=config.training.max_grad_norm,
+        non_blocking=optimization_settings["non_blocking"],
         mlflow_enabled=True,
         early_stopping_patience=config.training.early_stopping_patience,
         checkpoint_dir=hydra.utils.to_absolute_path(config.checkpoint_dir),
         positive_threshold=config.model.positive_threshold,
+        enable_progress=enable_progress,
+        total_folds=config.kfold.n_splits,
+        progress_refresh_per_second=refresh_rate,
     )
 
     # Train
@@ -174,6 +242,8 @@ def run_single_fold(
         model=trainer.model,
         device=device,
         use_bf16=config.training.optimization.use_bf16,
+        amp_dtype=optimization_settings["amp_dtype"],
+        non_blocking=optimization_settings["non_blocking"],
         positive_threshold=config.model.positive_threshold,
     )
     val_data = pairs_df.iloc[val_idx].reset_index(drop=True)
@@ -386,6 +456,8 @@ def run_hpo_worker(config: DictConfig, n_trials: int, worker_id: Optional[int] =
 
     # Set up MLflow
     setup_mlflow(config)
+    optimization_settings = _build_optimization_settings(config)
+    logging_cfg = config.training.get("logging", {}) or {}
 
     def objective(trial: optuna.Trial) -> float:
         """
@@ -435,6 +507,79 @@ def run_hpo_worker(config: DictConfig, n_trials: int, worker_id: Optional[int] =
             config.hpo.search_space.warmup_ratio.high,
         )
 
+        # Sample architecture hyperparameters (if configured)
+        classifier_head = None
+        head_space = config.hpo.search_space.get("classifier_head", None)
+        if head_space is not None:
+            classifier_head = trial.suggest_categorical(
+                "classifier_head",
+                head_space.choices,
+            )
+
+        # Sample dropout hyperparameters (if configured)
+        classifier_dropout = None
+        cd_space = config.hpo.search_space.get("classifier_dropout", None)
+        if cd_space is not None:
+            classifier_dropout = trial.suggest_float(
+                "classifier_dropout",
+                cd_space.low,
+                cd_space.high,
+            )
+
+        hidden_dropout = None
+        hd_space = config.hpo.search_space.get("hidden_dropout", None)
+        if hd_space is not None:
+            hidden_dropout = trial.suggest_float(
+                "hidden_dropout",
+                hd_space.low,
+                hd_space.high,
+            )
+
+        attention_dropout = None
+        ad_space = config.hpo.search_space.get("attention_dropout", None)
+        if ad_space is not None:
+            attention_dropout = trial.suggest_float(
+                "attention_dropout",
+                ad_space.low,
+                ad_space.high,
+            )
+
+        # Sample loss configuration (if configured)
+        loss_type = None
+        loss_space = config.hpo.search_space.get("loss_type", None)
+        if loss_space is not None:
+            loss_type = trial.suggest_categorical(
+                "loss_type",
+                loss_space.choices,
+            )
+
+        focal_gamma = None
+        fg_space = config.hpo.search_space.get("focal_gamma", None)
+        if fg_space is not None and (loss_type == "focal" or loss_type is None):
+            focal_gamma = trial.suggest_float(
+                "focal_gamma",
+                fg_space.low,
+                fg_space.high,
+            )
+
+        pos_weight = None
+        pos_space = config.hpo.search_space.get("pos_weight", None)
+        if pos_space is not None and (loss_type == "weighted_bce" or loss_type is None):
+            pos_weight = trial.suggest_float(
+                "pos_weight",
+                pos_space.low,
+                pos_space.high,
+            )
+
+        # Sample gradient accumulation steps (if configured)
+        gradient_accumulation_steps = config.training.gradient_accumulation_steps
+        ga_space = config.hpo.search_space.get("gradient_accumulation_steps", None)
+        if ga_space is not None:
+            gradient_accumulation_steps = trial.suggest_categorical(
+                "gradient_accumulation_steps",
+                ga_space.choices,
+            )
+
         augmentation_cfg = copy.deepcopy(config.get("augmentation", None))
         aug_enable_space = config.hpo.search_space.get("aug_enable", None)
         if augmentation_cfg is not None and aug_enable_space is not None:
@@ -451,6 +596,12 @@ def run_hpo_worker(config: DictConfig, n_trials: int, worker_id: Optional[int] =
                 augmentation_cfg.type = trial.suggest_categorical(
                     "aug_method", aug_method_space.choices
                 )
+                imbalance_mode_space = config.hpo.search_space.get("imbalance_mode", None)
+                if imbalance_mode_space is not None:
+                    augmentation_cfg.imbalance_mode = trial.suggest_categorical(
+                        "imbalance_mode",
+                        imbalance_mode_space.choices,
+                    )
             else:
                 augmentation_cfg.enable = False
         else:
@@ -498,14 +649,46 @@ def run_hpo_worker(config: DictConfig, n_trials: int, worker_id: Optional[int] =
                     batch_size=batch_size,
                     num_workers=config.training.num_workers,
                     pin_memory=config.training.pin_memory,
+                    persistent_workers=config.training.persistent_workers,
+                    bucket_by_length=config.training.bucket_by_length,
+                    bucket_size=config.training.bucket_size,
+                    seed=config.seed,
                 )
 
                 # Create model with sampled configuration
-                model = BERTClassifier(
-                    model_name=config.model.model_name,
-                    num_labels=config.model.num_labels,
-                    freeze_backbone=config.model.freeze_backbone,
-                )
+                # Detect model type based on model_name
+                model_name_lower = config.model.model_name.lower()
+                if "deberta" in model_name_lower:
+                    model = DeBERTaClassifier(
+                        model_name=config.model.model_name,
+                        num_labels=config.model.num_labels,
+                        classifier_head=classifier_head
+                        or config.model.get("classifier_head", "linear"),
+                        classifier_dropout=classifier_dropout
+                        or config.model.get("classifier_dropout", 0.1),
+                        hidden_dropout=hidden_dropout
+                        or config.model.get("hidden_dropout", None),
+                        attention_dropout=attention_dropout
+                        or config.model.get("attention_dropout", None),
+                        freeze_backbone=config.model.freeze_backbone,
+                        loss_type=loss_type or config.model.get("loss", {}).get("type", "bce"),
+                        focal_gamma=focal_gamma
+                        or config.model.get("loss", {}).get("focal_gamma", 2.0),
+                        focal_alpha=config.model.get("loss", {}).get("focal_alpha", None),
+                        pos_weight=pos_weight,
+                        attn_implementation=optimization_settings["attention_backend"],
+                        gradient_checkpointing=optimization_settings["gradient_checkpointing"],
+                        torch_dtype=optimization_settings["amp_dtype"],
+                    )
+                else:
+                    model = BERTClassifier(
+                        model_name=config.model.model_name,
+                        num_labels=config.model.num_labels,
+                        freeze_backbone=config.model.freeze_backbone,
+                        attn_implementation=optimization_settings["attention_backend"],
+                        gradient_checkpointing=optimization_settings["gradient_checkpointing"],
+                        torch_dtype=optimization_settings["amp_dtype"],
+                    )
 
                 # Create optimizer with trial hyperparameters
                 optimizer, scheduler = create_optimizer_and_scheduler(
@@ -516,7 +699,8 @@ def run_hpo_worker(config: DictConfig, n_trials: int, worker_id: Optional[int] =
                     weight_decay=weight_decay,
                     warmup_ratio=warmup_ratio,
                     use_fused=config.training.optimization.fused_adamw,
-                    gradient_accumulation_steps=config.training.gradient_accumulation_steps,
+                    optimizer_type=optimization_settings["optimizer"],
+                    gradient_accumulation_steps=gradient_accumulation_steps,
                 )
 
                 # Create trainer
@@ -528,12 +712,20 @@ def run_hpo_worker(config: DictConfig, n_trials: int, worker_id: Optional[int] =
                     scheduler=scheduler,
                     device=device,
                     use_bf16=config.training.optimization.use_bf16,
-                    use_compile=config.training.optimization.use_torch_compile,
-                    gradient_accumulation_steps=config.training.gradient_accumulation_steps,
+                    amp_dtype=optimization_settings["amp_dtype"],
+                    use_grad_scaler=optimization_settings["use_grad_scaler"],
+                    use_compile=optimization_settings["use_compile"],
+                    gradient_accumulation_steps=gradient_accumulation_steps,
                     max_grad_norm=config.training.max_grad_norm,
+                    non_blocking=optimization_settings["non_blocking"],
                     mlflow_enabled=False,  # Disable per-step logging during HPO
                     early_stopping_patience=config.training.early_stopping_patience,
                     positive_threshold=config.model.positive_threshold,
+                    enable_progress=logging_cfg.get("hpo_progress", False),
+                    total_folds=config.kfold.n_splits,
+                    progress_refresh_per_second=logging_cfg.get(
+                        "progress_refresh_per_second", 4
+                    ),
                 )
 
                 # Train with configured epochs (HPO will control runtime via trials/early stopping)
@@ -566,11 +758,20 @@ def run_hpo_worker(config: DictConfig, n_trials: int, worker_id: Optional[int] =
         return mean_f1
 
     # Create Optuna study (load existing if available)
-    pruner = MedianPruner(
-        n_startup_trials=config.hpo.pruner.n_startup_trials,
-        n_warmup_steps=config.hpo.pruner.n_warmup_steps,
-        interval_steps=config.hpo.pruner.interval_steps,
-    )
+    pruner_cfg = config.hpo.pruner
+    pruner_type = str(getattr(pruner_cfg, "type", "MedianPruner")).lower()
+    if pruner_type in {"hyperbandpruner", "hyperband"}:
+        pruner = optuna.pruners.HyperbandPruner(
+            min_resource=getattr(pruner_cfg, "min_resource", 1),
+            max_resource=getattr(pruner_cfg, "max_resource", config.training.num_epochs),
+            reduction_factor=getattr(pruner_cfg, "reduction_factor", 3),
+        )
+    else:
+        pruner = MedianPruner(
+            n_startup_trials=getattr(pruner_cfg, "n_startup_trials", 5),
+            n_warmup_steps=getattr(pruner_cfg, "n_warmup_steps", 3),
+            interval_steps=getattr(pruner_cfg, "interval_steps", 1),
+        )
 
     storage = _resolve_optuna_storage(config.hpo.storage)
     study = optuna.create_study(
@@ -729,6 +930,7 @@ def run_eval(config: DictConfig, fold: int = 0):
 
     set_seed(config.seed)
     device = get_device()
+    optimization_settings = _build_optimization_settings(config)
 
     # Load data
     pairs_df = load_and_preprocess_data(config)
@@ -754,12 +956,15 @@ def run_eval(config: DictConfig, fold: int = 0):
     )
 
     # Create dataloader
+    persistent = config.training.persistent_workers and config.training.num_workers > 0
+    use_pin_memory = config.training.pin_memory and torch.cuda.is_available()
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.training.batch_size,
         shuffle=False,
         num_workers=config.training.num_workers,
-        pin_memory=config.training.pin_memory,
+        pin_memory=use_pin_memory,
+        persistent_workers=persistent,
     )
 
     # Load model from checkpoint
@@ -773,7 +978,12 @@ def run_eval(config: DictConfig, fold: int = 0):
         console.print("Run training first: python -m criteria_bge_hpo.cli command=train")
         sys.exit(1)
 
-    model = BERTClassifier.from_pretrained(checkpoint_path)
+    model = BERTClassifier.from_pretrained(
+        checkpoint_path,
+        attn_implementation=optimization_settings["attention_backend"],
+        gradient_checkpointing=optimization_settings["gradient_checkpointing"],
+        torch_dtype=optimization_settings["amp_dtype"],
+    )
     model.to(device)
 
     # Evaluate
@@ -781,6 +991,8 @@ def run_eval(config: DictConfig, fold: int = 0):
         model=model,
         device=device,
         use_bf16=config.training.optimization.use_bf16,
+        amp_dtype=optimization_settings["amp_dtype"],
+        non_blocking=optimization_settings["non_blocking"],
         positive_threshold=config.model.positive_threshold,
     )
 
@@ -809,14 +1021,14 @@ def main(config: DictConfig):
         console.print(
             "  python -m criteria_bge_hpo.cli command=train training.num_epochs=100 training.early_stopping_patience=20"
         )
-        console.print("  python -m criteria_bge_hpo.cli command=hpo n_trials=500")
+        console.print("  python -m criteria_bge_hpo.cli command=hpo n_trials=100")
         console.print("  python -m criteria_bge_hpo.cli command=eval fold=0")
         sys.exit(1)
 
     if command == "train":
         run_kfold_training(config)
     elif command == "hpo":
-        n_trials = config.get("n_trials", 500)
+        n_trials = config.get("n_trials", 100)
         run_hpo(config, n_trials)
     elif command == "hpo_parallel":
         n_workers = config.get("n_workers", 2)
@@ -827,7 +1039,7 @@ def main(config: DictConfig):
         # Internal command for parallel workers
         worker_config = config.get("hpo_worker", {})
         worker_id = worker_config.get("worker_id", None)
-        n_trials = worker_config.get("n_trials", 500)
+        n_trials = worker_config.get("n_trials", 100)
         max_total_trials = worker_config.get("max_total_trials", None)
 
         # Run worker with optional max_total_trials limit

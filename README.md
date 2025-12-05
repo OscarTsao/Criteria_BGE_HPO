@@ -43,21 +43,20 @@ python -m criteria_bge_hpo.cli command=train training.num_epochs=100 training.ea
 # Evaluate a saved fold checkpoint
 python -m criteria_bge_hpo.cli command=eval fold=0
 
-# Hyper-parameter search with Optuna (LoRA/QLoRA + threshold tuning; defaults to 500 trials)
-python -m criteria_bge_hpo.cli command=hpo n_trials=500
+# Hyper-parameter search with Optuna (LoRA/QLoRA + threshold tuning; defaults to 100 trials)
+python -m criteria_bge_hpo.cli command=hpo n_trials=100
 ```
 
 Training logs accuracy, F1, precision, recall, and AUC per fold and saves the best checkpoint for each
 fold to `outputs/<experiment>/checkpoints/fold_<n>_best.pt`.
 
-Key config knobs (see `configs/hpo/pc_ce.yaml` for the HPO search space):
+Key config knobs (see `configs/hpo/optuna.yaml` for the HPO search space):
 
-- Model backbone: `BAAI/bge-reranker-v2-m3` (single supported reranker)
+- Model backbone: `microsoft/deberta-v3-base` by default (overrideable with any HF encoder)
 - `data.groundtruth_csv` – location of the unified dataset
 - `data.criteria_json` – DSM-5 criterion metadata
 - `model.*`, `training.*`, `hpo.*` – composable overrides under `configs/`
-- HPO search space includes LoRA/QLoRA ranks/alphas/dropout, schedulers, warmup, batch/accum,
-  post-hoc threshold mode (per-class vs global), aggregation knobs, and loss variants.
+- HPO search space covers learning rate, batch size, weight decay, and warmup ratio.
 
 ## Development Workflow
 

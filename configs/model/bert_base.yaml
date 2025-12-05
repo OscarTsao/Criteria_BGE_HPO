@@ -1,18 +1,18 @@
 # ============================================================================
-# BGE Reranker Model Configuration
+# Base Transformer Sequence Classification Model
 # ============================================================================
-# Single supported model: BAAI/bge-reranker-v2-m3 (XLM-R based cross-encoder)
+# Default: bert-base-uncased (override with any Hugging Face checkpoint)
 # ============================================================================
 
 # Hugging Face model identifier
-model_name: BAAI/bge-reranker-v2-m3
+model_name: bert-base-uncased
 
 # Number of labels for sequence classification
-# - Keep at 1 to align with the pretrained reranker head (score via sigmoid)
-num_labels: 1
+# - Use 2 for standard binary classification with a two-logit head
+num_labels: 2
 
 # Optionally freeze the encoder and train only the classification head
 freeze_backbone: false
 
-# Decision threshold applied to the sigmoid score during evaluation/metrics
+# Decision threshold applied when using single-logit heads (BCEWithLogits)
 positive_threshold: 0.5

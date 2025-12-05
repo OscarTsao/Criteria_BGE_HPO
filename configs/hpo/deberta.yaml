@@ -1,0 +1,64 @@
+# Hyperparameter optimization configuration for DeBERTa
+study_name: "deberta_hpo"
+storage: "sqlite:///optuna.db"
+direction: "maximize"  # Maximize F1 score
+n_trials: 100
+timeout: null
+
+# Pruning configuration
+pruner:
+  _target_: optuna.pruners.MedianPruner
+  n_startup_trials: 5
+  n_warmup_steps: 10
+  interval_steps: 1
+
+# Search space
+search_space:
+  # Learning rate: log-uniform between 1e-6 and 1e-4
+  learning_rate:
+    type: "loguniform"
+    low: 1.0e-6
+    high: 1.0e-4
+
+  # Batch size: categorical choices
+  batch_size:
+    type: "categorical"
+    choices: [4, 8, 16]
+
+  # Dropout: uniform between 0.0 and 0.3
+  dropout:
+    type: "uniform"
+    low: 0.0
+    high: 0.3
+
+  # Weight decay: log-uniform between 1e-4 and 1e-1
+  weight_decay:
+    type: "loguniform"
+    low: 1.0e-4
+    high: 1.0e-1
+
+  # Warmup ratio: uniform between 0.0 and 0.2
+  warmup_ratio:
+    type: "uniform"
+    low: 0.0
+    high: 0.2
+
+  # Classifier head: categorical choices
+  classifier_head:
+    type: "categorical"
+    choices: ["linear", "pooler_linear", "mlp1", "mlp2", "mean_pooling", "attention_pooling"]
+
+  # Number of epochs: categorical choices
+  epochs:
+    type: "categorical"
+    choices: [10, 15, 20]
+
+# Fixed parameters (not optimized)
+fixed_params:
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  early_stopping_patience: 5
+  use_bf16: true
+  use_tf32: true
+  use_torch_compile: false
+  fused_adamw: true

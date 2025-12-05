@@ -2,7 +2,7 @@
 # Optuna Hyperparameter Optimization Configuration
 # ============================================================================
 # Defines HPO study settings, pruning strategy, and search space
-# Run via: python -m Project.cli command=hpo n_trials=500
+# Run via: python -m Project.cli command=hpo n_trials=100
 # ============================================================================
 
 # ============================================================================
@@ -10,11 +10,11 @@
 # ============================================================================
 
 # n_trials: Number of hyperparameter combinations to evaluate
-#   - Default: 500 (paired with 100-epoch folds and patience 20)
+#   - Default: 100 (paired with 100-epoch folds and patience 20)
 #   - Each trial runs full 100-epoch K-fold CV (patience 20)
 #   - Higher = better hyperparameters but longer runtime
-#   - Typical values: 100-500 for medium search spaces; >500 for exhaustive search
-n_trials: 500
+#   - Typical values: 50-200 for medium search spaces; >200 for exhaustive search
+n_trials: 100
 
 # storage: Database backend for storing trial history
 #   - PostgreSQL recommended for parallel HPO (better concurrency)
@@ -32,8 +32,8 @@ storage: ${oc.env:OPTUNA_STORAGE,sqlite:///optuna.db}
 # study_name: Unique identifier for this optimization study
 #   - Used to group related trials together
 #   - Can resume study with same name: load_if_exists=True
-#   - Best practice: descriptive name like "dsm5_bge_reranker_v1"
-study_name: project_hpo
+#   - Best practice: descriptive name like "dsm5_transformer_baseline_v1"
+study_name: transformer_hpo
 
 # direction: Optimization direction for objective metric
 #   - maximize: For metrics like F1, accuracy, AUC (default)
@@ -44,29 +44,12 @@ direction: maximize
 # ============================================================================
 # PRUNING CONFIGURATION
 # ============================================================================
-# Early stopping for unpromising trials to save computation time
 pruner:
-  # type: Pruning algorithm
-  #   - MedianPruner: Stops trials performing worse than median of previous trials
-  #   - More aggressive alternatives: SuccessiveHalvingPruner, HyperbandPruner
-  type: MedianPruner
-
-  # n_startup_trials: Number of initial trials to complete before pruning
-  #   - Default: 5 (gather baseline statistics first)
-  #   - Early trials establish median baseline for comparison
-  #   - Higher = more conservative pruning (fewer early stops)
-  n_startup_trials: 5
-
-  # n_warmup_steps: Number of steps (folds) before pruning can occur
-  #   - Default: 3 (wait until 3 folds complete)
-  #   - Prevents premature pruning based on first fold's variance
-  #   - With 5 folds total, pruning can occur after fold 3
-  n_warmup_steps: 3
-
-  # interval_steps: Check pruning condition every N steps (folds)
-  #   - Default: 1 (check after every fold)
-  #   - Higher = less frequent checks (e.g., 2 = check every 2 folds)
-  interval_steps: 1
+  # Hyperband aggressively prunes under-performing trials (critical for large trial counts)
+  type: HyperbandPruner
+  min_resource: 1
+  max_resource: 100
+  reduction_factor: 3
 
 # ============================================================================
 # HYPERPARAMETER SEARCH SPACE
@@ -77,23 +60,18 @@ pruner:
 search_space:
   # learning_rate: AdamW learning rate
   #   - type: loguniform - samples from log scale (better for orders of magnitude)
-  #   - Range: [5e-6, 3e-5] - conservative for XLM-R based reranker
-  #   - Examples: 6e-6, 1e-5, 2e-5
-  #   - Log scale ensures good coverage of 5e-6, 1e-5, 3e-5
+#   - Range: [5e-6, 3e-5] - conservative for base encoders
+#   - Examples: 6e-6, 1e-5, 2e-5
+#   - Log scale ensures good coverage of 5e-6, 1e-5, 3e-5
   learning_rate:
     type: loguniform
     low: 5e-6
     high: 3e-5
 
-  # batch_size: Training batch size
-  #   - type: categorical - discrete choices only
-  #   - Choices: [4, 8, 16] - XLM-R large reranker is memory intensive
-  #   - 4: Safest for limited memory
-  #   - 8: Balanced (default)
-  #   - 16: Faster but high memory
+  # batch_size: Training batch size (effective batch simulated via grad accumulation)
   batch_size:
     type: categorical
-    choices: [4, 8, 16]
+    choices: [16, 32]
 
   # weight_decay: L2 regularization strength for AdamW
   #   - type: loguniform - log scale for order of magnitude search
@@ -110,8 +88,43 @@ search_space:
   #   - Range: [0.05, 0.15] - 5% to 15% of total steps
   #   - Lower = shorter warmup (faster convergence, may be unstable)
   #   - Higher = longer warmup (more stable, slower convergence)
-  #   - Warmup prevents initial instability in BERT fine-tuning
+  #   - Warmup prevents initial instability in Transformer fine-tuning
   warmup_ratio:
     type: uniform
-    low: 0.05
-    high: 0.15
+    low: 0.0
+    high: 0.2
+
+  # classifier_head architecture search
+  classifier_head:
+    type: categorical
+    choices: ["linear", "mean_pooling", "max_pooling", "attention_pooling", "mlp1"]
+
+  # classifier_dropout: Dropout on classification head
+  classifier_dropout:
+    type: uniform
+    low: 0.1
+    high: 0.5
+
+  # pos_weight: Positive class weight for imbalance handling (Weighted BCE)
+  pos_weight:
+    type: uniform
+    low: 1.0
+    high: 5.0
+
+  # use_augmentation: Toggle evidence-span augmentation
+  aug_enable:
+    type: categorical
+    choices: [true, false]
+
+  aug_prob:
+    type: uniform
+    low: 0.1
+    high: 0.7
+
+  aug_method:
+    type: categorical
+    choices: ["nlpaug_synonym", "nlpaug_contextual"]
+
+  imbalance_mode:
+    type: categorical
+    choices: ["minority_only", "all"]

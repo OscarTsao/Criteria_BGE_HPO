@@ -4,8 +4,23 @@ Provides Rich-based terminal formatting for headers, tables, and summaries.
 Used throughout the CLI to create visually appealing training logs.
 """
 
-from rich.console import Console
+from typing import Optional
+
+from rich.align import Align
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
+from rich.text import Text
 
 # Global console instance for all Rich output
 console = Console()
@@ -46,7 +61,7 @@ def print_config_summary(config):
     Example output:
         CONFIGURATION SUMMARY
         ══════════════════════════════════════════════════════════
-        Model             bert-base-uncased
+        Model             microsoft/deberta-v3-base
         Batch Size        32
         Learning Rate     2e-05
         Epochs            10
@@ -155,3 +170,213 @@ def print_fold_summary(fold_results):
         "mean_recall": mean_recall,
         "mean_auc": mean_auc,
     }
+
+
+class TrainingProgressDisplay:
+    """Live Rich dashboard for epoch/step progress and key metrics."""
+
+    def __init__(
+        self,
+        total_epochs: int,
+        steps_per_epoch: int,
+        fold: int = 0,
+        total_folds: int = 1,
+        patience: Optional[int] = None,
+        refresh_per_second: int = 4,
+    ):
+        self.total_epochs = total_epochs
+        self.steps_per_epoch = max(1, steps_per_epoch)
+        self.fold = fold
+        self.total_folds = total_folds
+        self.patience = patience
+        self.refresh_per_second = max(1, int(refresh_per_second or 4))
+
+        self.metrics = {
+            "epoch": 0,
+            "train_loss": None,
+            "val_f1": None,
+            "best_f1": None,
+            "best_epoch": None,
+            "lr": None,
+            "patience_left": patience,
+        }
+        self.status = "Waiting for first epoch..."
+        self._running_loss = 0.0
+        self._step_seen = 0
+
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}", justify="left"),
+            BarColumn(bar_width=None),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            expand=True,
+        )
+        self.epoch_task = self.progress.add_task(
+            f"Fold {fold + 1}/{total_folds} epochs", total=total_epochs
+        )
+        self.step_task = self.progress.add_task(
+            "Step progress",
+            total=self.steps_per_epoch,
+        )
+        self.live = Live(
+            self._render(), console=console, refresh_per_second=self.refresh_per_second
+        )
+
+        self.progress.start_task(self.epoch_task)
+        self.progress.start_task(self.step_task)
+
+    def start(self):
+        """Start rendering the live dashboard."""
+        self.progress.start()
+        self.live.start()
+        self._refresh()
+
+    def start_epoch(self, epoch: int, steps: int):
+        """Reset step progress for a new epoch."""
+        self.metrics["epoch"] = epoch
+        self._running_loss = 0.0
+        self._step_seen = 0
+
+        self.steps_per_epoch = max(1, steps)
+        self.progress.reset(
+            self.step_task,
+            total=self.steps_per_epoch,
+            completed=0,
+        )
+        self.progress.update(
+            self.step_task,
+            description=f"Epoch {epoch}/{self.total_epochs}",
+        )
+        self.progress.start_task(self.step_task)
+        self._refresh()
+
+    def advance_step(self, loss: float):
+        """Advance step progress and accumulate loss."""
+        self._running_loss += loss
+        self._step_seen += 1
+        self.progress.advance(self.step_task)
+
+        # Light touch refresh during the epoch to avoid excessive redraws
+        if self._step_seen % 5 == 0 or self._step_seen == self.steps_per_epoch:
+            self._refresh()
+
+    def finish_epoch(
+        self,
+        val_f1: float,
+        best_f1: float,
+        best_epoch: int,
+        current_lr: float,
+        patience_left: Optional[int],
+    ):
+        """Update metrics after validation."""
+        avg_loss = self._running_loss / max(1, self._step_seen)
+        self.metrics.update(
+            {
+                "train_loss": avg_loss,
+                "val_f1": val_f1,
+                "best_f1": best_f1,
+                "best_epoch": best_epoch,
+                "lr": current_lr,
+                "patience_left": patience_left,
+            }
+        )
+        self.progress.update(self.epoch_task, completed=self.metrics["epoch"])
+        self.progress.update(self.step_task, completed=self.steps_per_epoch)
+        self._refresh()
+
+    def update_status(self, message: str, style: str = "cyan"):
+        """Display a short status message beneath the dashboard."""
+        self.status = f"[{style}]{message}[/{style}]"
+        self._refresh()
+
+    def stop(self):
+        """Stop live rendering."""
+        self._refresh()
+        self.live.stop()
+        self.progress.stop()
+
+    def _refresh(self):
+        if self.live.is_started:
+            self.live.update(self._render(), refresh=True)
+
+    def _render(self):
+        header = Align.center(
+            Text(
+                f"Fold {self.fold + 1}/{self.total_folds} Training",
+                style="bold white",
+            )
+        )
+        status_line = Align.left(Text.from_markup(self.status))
+
+        body = Group(
+            header,
+            self.progress,
+            self._metrics_table(),
+            status_line,
+        )
+        return Panel(body, border_style="cyan", padding=(1, 2))
+
+    def _metrics_table(self):
+        table = Table.grid(expand=True)
+        table.add_column(justify="center")
+        table.add_column(justify="center")
+        table.add_column(justify="center")
+
+        table.add_row(
+            self._metric_cell(
+                "Epoch",
+                f"{self.metrics['epoch']}/{self.total_epochs}",
+                "cyan",
+            ),
+            self._metric_cell(
+                "Train Loss",
+                self._fmt(self.metrics["train_loss"]),
+                "yellow",
+            ),
+            self._metric_cell(
+                "Val F1",
+                self._fmt(self.metrics["val_f1"]),
+                "green",
+            ),
+        )
+        table.add_row(
+            self._metric_cell("Best F1", self._format_best(), "bright_green"),
+            self._metric_cell("LR", self._format_lr(), "magenta"),
+            self._metric_cell("Patience", self._format_patience(), "blue"),
+        )
+        return table
+
+    def _metric_cell(self, label: str, value: str, color: str):
+        return Panel(
+            Align.center(Text(value, justify="center")),
+            title=label,
+            border_style=color,
+            padding=(0, 1),
+        )
+
+    @staticmethod
+    def _fmt(value: Optional[float], precision: int = 4) -> str:
+        if value is None:
+            return "—"
+        return f"{value:.{precision}f}"
+
+    def _format_best(self) -> str:
+        if self.metrics["best_f1"] is None:
+            return "—"
+        best_epoch = self.metrics.get("best_epoch") or 0
+        return f"{self.metrics['best_f1']:.4f} @ {best_epoch}"
+
+    def _format_lr(self) -> str:
+        if self.metrics["lr"] is None:
+            return "—"
+        return f"{self.metrics['lr']:.2e}"
+
+    def _format_patience(self) -> str:
+        if self.patience is None:
+            return "∞"
+        if self.metrics["patience_left"] is None:
+            return str(self.patience)
+        return str(max(0, int(self.metrics["patience_left"])))

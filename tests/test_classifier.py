@@ -1,4 +1,4 @@
-"""Tests for the BGE reranker-only configuration."""
+"""Tests for the generic classifier configuration."""
 
 import sys
 from pathlib import Path
@@ -43,29 +43,30 @@ def sample_data():
 
 
 def test_default_model_config(config_dir):
-    """Hydra loads the single supported model configuration."""
+    """Hydra loads the generic model configuration."""
     with initialize_config_dir(version_base=None, config_dir=config_dir):
         cfg = compose(config_name="config")
 
-    assert cfg.model.model_name == "BAAI/bge-reranker-v2-m3"
-    assert cfg.model.num_labels == 1
+    assert cfg.model.model_name == "microsoft/deberta-v3-base"
+    assert cfg.model.num_labels == 2
     assert cfg.model.freeze_backbone is False
     assert cfg.model.positive_threshold == pytest.approx(0.5)
 
 
-def test_dataset_with_bge_tokenizer(sample_data):
-    """Dataset builds pairs without token_type_ids for XLM-R based reranker."""
-    tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-v2-m3")
+def test_dataset_with_token_type_ids(sample_data):
+    """Dataset includes token_type_ids for BERT-style tokenizers."""
+    tokenizer = AutoTokenizer.from_pretrained("prajjwal1/bert-tiny")
     dataset = DSM5NLIDataset(sample_data, tokenizer, max_length=128, verify_format=True)
 
     sample = dataset[0]
-    assert "token_type_ids" not in sample
+    assert "token_type_ids" in sample
     assert sample["input_ids"].shape == (128,)
     assert sample["attention_mask"].shape == (128,)
+    assert sample["token_type_ids"].shape == (128,)
 
 
 class _DummyModel(torch.nn.Module):
-    """Tiny stand-in for AutoModelForSequenceClassification."""
+    """Tiny stand-in for AutoModelForSequenceClassification with two logits."""
 
     def __init__(self, config: AutoConfig):
         super().__init__()
@@ -81,10 +82,10 @@ class _DummyModel(torch.nn.Module):
         return {"logits": logits}
 
 
-def test_bge_classifier_forward_single_logit(monkeypatch):
-    """Model wrapper uses BCEWithLogitsLoss for single-logit heads."""
-    config = AutoConfig.from_pretrained("BAAI/bge-reranker-v2-m3")
-    config.num_labels = 1
+def test_classifier_forward_two_logits(monkeypatch):
+    """Model wrapper uses CrossEntropyLoss for two-logit heads."""
+    config = AutoConfig.from_pretrained("prajjwal1/bert-tiny")
+    config.num_labels = 2
 
     monkeypatch.setattr(
         "criteria_bge_hpo.models.bert_classifier.AutoModelForSequenceClassification.from_pretrained",
@@ -92,15 +93,15 @@ def test_bge_classifier_forward_single_logit(monkeypatch):
     )
 
     model = BERTClassifier(
-        model_name="BAAI/bge-reranker-v2-m3",
-        num_labels=1,
+        model_name="prajjwal1/bert-tiny",
+        num_labels=2,
         config=config,
     )
 
     batch_size, seq_len = 2, 5
     input_ids = torch.ones(batch_size, seq_len, dtype=torch.long)
     attention_mask = torch.ones_like(input_ids)
-    labels = torch.tensor([1.0, 0.0])
+    labels = torch.tensor([1, 0])
 
     outputs = model(
         input_ids=input_ids,
@@ -108,7 +109,7 @@ def test_bge_classifier_forward_single_logit(monkeypatch):
         labels=labels,
     )
 
-    assert outputs["logits"].shape == (batch_size, 1)
+    assert outputs["logits"].shape == (batch_size, 2)
     assert outputs["loss"] is not None
     outputs["loss"].backward()
     assert model.model.classifier.weight.grad is not None
@@ -119,7 +120,7 @@ class _FixedLogitModel(torch.nn.Module):
 
     def __init__(self, logits):
         super().__init__()
-        self.config = AutoConfig.from_pretrained("BAAI/bge-reranker-v2-m3")
+        self.config = AutoConfig.from_pretrained("prajjwal1/bert-tiny")
         self.config.num_labels = 1
         self._logits = torch.tensor(logits, dtype=torch.float)
         self._cursor = 0

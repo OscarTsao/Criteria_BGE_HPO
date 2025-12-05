@@ -1,0 +1,33 @@
+# Training configuration for DeBERTa models
+num_epochs: 15
+batch_size: 8
+gradient_accumulation_steps: 4
+learning_rate: 2.0e-5
+weight_decay: 0.01
+warmup_ratio: 0.1
+max_grad_norm: 1.0
+
+# Early stopping
+early_stopping_patience: 5
+
+# Optimization flags
+optimization:
+  use_bf16: true  # Enable bfloat16 on Ampere+ GPUs
+  enable_fp16_fallback: true  # FP16 path with GradScaler if BF16 unsupported
+  attention_backend: flash_attention_2  # Fallbacks to SDPA when flash-attn missing
+  gradient_checkpointing: true
+  use_torch_compile: false  # Disabled per request
+  fused_adamw: true  # Use fused AdamW kernel when available
+  optimizer: adamw_torch_fused
+
+# Logging
+logging_steps: 50
+save_steps: 500
+eval_steps: 500
+
+# Data loading performance
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+bucket_by_length: true
+bucket_size: 50

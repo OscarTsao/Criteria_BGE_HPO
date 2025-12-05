@@ -1,0 +1,118 @@
+# Nested Cross-Validation Hyperparameter Optimization Configuration
+# Each trial runs full 5-fold CV, returning average Macro-F1
+
+study_name: "deberta_nli_nested_cv"
+storage: "sqlite:///optuna_nested_cv.db"
+direction: "maximize"  # Maximize Macro-F1
+n_trials: 100
+timeout: null
+
+# Aggressive pruning after fold 1 for 80% compute savings
+pruner:
+  _target_: optuna.pruners.HyperbandPruner
+  min_resource: 1
+  max_resource: 100
+  reduction_factor: 3
+
+# Comprehensive search space for nested CV
+search_space:
+  # Architecture hyperparameters
+  classifier_head:
+    type: "categorical"
+    choices: ["linear", "mean_pooling", "max_pooling", "attention_pooling", "mlp1"]
+
+  # Optimizer hyperparameters
+  learning_rate:
+    type: "loguniform"
+    low: 1.0e-6
+    high: 5.0e-5
+
+  weight_decay:
+    type: "loguniform"
+    low: 1.0e-4
+    high: 1.0e-1
+
+  warmup_ratio:
+    type: "uniform"
+    low: 0.0
+    high: 0.2
+
+  # Regularization: Dropout parameters
+  classifier_dropout:
+    type: "uniform"
+    low: 0.1
+    high: 0.5
+
+  hidden_dropout:
+    type: "uniform"
+    low: 0.1
+    high: 0.3
+
+  attention_dropout:
+    type: "uniform"
+    low: 0.1
+    high: 0.3
+
+  # Training hyperparameters
+  batch_size:
+    type: "categorical"
+    choices: [16, 32]
+
+  gradient_accumulation_steps:
+    type: "categorical"
+    choices: [2, 4, 8]
+
+  epochs:
+    type: "categorical"
+    choices: [50, 75, 100]
+
+  # Loss configuration
+  loss_type:
+    type: "categorical"
+    choices: ["focal", "bce", "weighted_bce"]
+
+  focal_gamma:
+    type: "uniform"
+    low: 1.0
+    high: 3.0
+
+  pos_weight:
+    type: "uniform"
+    low: 1.0
+    high: 5.0
+
+  # Augmentation toggle/search
+  aug_enable:
+    type: "categorical"
+    choices: [true, false]
+
+  aug_prob:
+    type: "uniform"
+    low: 0.1
+    high: 0.7
+
+  aug_method:
+    type: "categorical"
+    choices: ["nlpaug_synonym", "nlpaug_contextual"]
+
+  imbalance_mode:
+    type: "categorical"
+    choices: ["minority_only", "all"]
+
+# Fixed parameters (not optimized)
+fixed_params:
+  max_grad_norm: 1.0
+  early_stopping_patience: 5
+  use_bf16: true
+  use_tf32: true
+  use_torch_compile: false  # DeBERTa compatibility
+  fused_adamw: true
+  freeze_backbone: false
+  gradient_checkpointing: false
+
+# Nested CV configuration
+nested_cv:
+  n_folds: 5
+  random_state: 42
+  shuffle: true
+  group_by_post: true  # Group by post_id to prevent leakage

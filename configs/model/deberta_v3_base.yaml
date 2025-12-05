@@ -1,0 +1,12 @@
+# DeBERTa-v3-base model configuration
+model_name: "microsoft/deberta-v3-base"
+num_labels: 2
+dropout: 0.1
+classifier_head: "linear"  # Options: linear, pooler_linear, mlp1, mlp2, mean_pooling, attention_pooling
+freeze_backbone: false
+positive_threshold: 0.5
+
+# Classification head parameters (used when applicable)
+head_config:
+  num_attention_heads: 8  # For attention_pooling
+  intermediate_dim: null  # For mlp2, null means 2*hidden_size

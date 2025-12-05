@@ -1,7 +1,7 @@
 # ============================================================================
 # Training Hyperparameters Configuration
 # ============================================================================
-# Default training settings tuned for BAAI/bge-reranker-v2-m3 (XLM-R large)
+# Default training settings for Transformer sequence classifiers
 # All parameters can be overridden via CLI or HPO
 # ============================================================================
 
@@ -10,12 +10,12 @@
 # ============================================================================
 
 # batch_size: Number of samples per training batch
-#   - Default: 8 (reranker backbone is memory intensive)
+#   - Default: 8 (fits common base encoders)
 #   - Larger = faster training but more memory (try 16)
 #   - Smaller = less memory but slower (try 4)
 batch_size: 8
 
-# learning_rate: AdamW learning rate for fine-tuning BGE reranker
+# learning_rate: AdamW learning rate for fine-tuning the encoder
 #   - Default: 1e-5 (stable for XLM-R large backbones)
 #   - Typical range: 5e-6 to 3e-5
 #   - Too high: unstable training, divergence
@@ -56,13 +56,28 @@ optimization:
   #   - Requires Ampere+ GPU (RTX 30xx, 40xx, 50xx)
   use_bf16: true
 
+  # enable_fp16_fallback: If BF16 is unavailable, use FP16 + GradScaler
+  #   - true: Keeps mixed precision even on GPUs without BF16
+  #   - false: Falls back to FP32 when BF16 is unavailable
+  enable_fp16_fallback: true
+
+  # attention_backend: Attention kernel to use
+  #   - flash_attention_2: Fastest when flash-attn is installed (falls back automatically)
+  #   - sdpa: PyTorch SDPA/flash attention backend (no extra install)
+  attention_backend: flash_attention_2
+
+  # gradient_checkpointing: Save activation memory by recomputing during backward
+  #   - true: Enables gradient checkpointing on supported models
+  #   - false: Standard training (higher memory)
+  gradient_checkpointing: true
+
   # use_torch_compile: Enable PyTorch 2.0+ JIT compilation
   #   - true: 10-20% speedup via graph optimization (recommended)
   #   - false: Eager execution mode
   #   - First epoch slow (compilation), subsequent epochs faster
   #   - Requires PyTorch 2.0+
   #   - May cause issues with dynamic shapes or custom ops
-  use_torch_compile: false
+  use_torch_compile: false  # disabled per optimization request
 
   # fused_adamw: Use fused AdamW optimizer kernel
   #   - true: 5-10% speedup by fusing optimizer ops (recommended)
@@ -70,6 +85,12 @@ optimization:
   #   - Requires CUDA and PyTorch built with CUDA support
   #   - Minimal downside, significant speed gain
   fused_adamw: true
+
+  # optimizer: Which optimizer implementation to use
+  #   - adamw_torch_fused: Best default when CUDA available
+  #   - adamw_bnb_8bit: 8-bit optimizer when bitsandbytes is installed
+  #   - adamw: Standard AdamW
+  optimizer: adamw_torch_fused
 
 # ============================================================================
 # ADVANCED TRAINING SETTINGS
@@ -117,3 +138,28 @@ num_workers: 4
 #   - Only beneficial when training on GPU
 #   - Increases CPU memory usage slightly
 pin_memory: true
+
+# persistent_workers: Keep DataLoader workers alive between epochs
+#   - true: Faster epoch boundaries when num_workers>0
+#   - false: Spawn new workers each epoch
+persistent_workers: true
+
+# bucket_by_length: Group samples of similar text length to reduce padding
+#   - true: Bucketed batches for higher throughput
+#   - false: Standard random shuffling
+bucket_by_length: true
+
+# bucket_size: Number of samples per length bucket (bigger = more randomness)
+bucket_size: 50
+
+# ============================================================================
+# LOGGING & VISUALIZATION
+# ============================================================================
+# Rich-based, live terminal dashboard for training progress
+logging:
+  # rich_progress: Enable Rich live dashboard during standard training
+  rich_progress: true
+  # hpo_progress: Show live dashboard during HPO trials (verbose; off by default)
+  hpo_progress: false
+  # progress_refresh_per_second: Refresh rate for the dashboard (higher = smoother)
+  progress_refresh_per_second: 4

@@ -11,7 +11,7 @@
 1. `criteria_bge_hpo.cli` loads Hydra config, sets up MLflow/Optuna, and kicks off the requested command.
 2. `data.preprocessing` reads the unified ground-truth CSV and DSM-5 JSON metadata, then prepares `(post, criterion)` pairs.
 3. `data.dataset` tokenizes each pair and exposes PyTorch loaders with safe fallbacks when multiprocessing is unavailable.
-4. `models.bert_classifier` wraps the BGE reranker checkpoint for binary scoring (single-logit head).
+4. `models.bert_classifier` wraps a Hugging Face encoder for binary scoring (single- or two-logit heads).
 5. `training.trainer` handles optimization, early stopping, mixed precision, and checkpointing per fold.
 6. `evaluation.evaluator` reports aggregate plus per-criterion metrics and logs them to MLflow.
 
@@ -24,4 +24,3 @@
 
 - Run `pytest` for the fast unit suite, `ruff check` for linting, and `black` for formatting.
 - Use `tests/test_data_pipeline.py` as an example for lightweight fixtures that avoid touching the full dataset.
-

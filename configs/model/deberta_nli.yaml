@@ -1,0 +1,27 @@
+# DeBERTa-v3-base NLI-pretrained model configuration
+# Model: MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli
+# Pretrained on MNLI, FEVER, ANLI datasets for Natural Language Inference
+
+model_name: "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+num_labels: 1  # Binary classification with sigmoid activation
+classifier_head: "linear"  # Options: linear, mean_pooling, max_pooling, attention_pooling, mlp1
+
+# Dropout configuration (tunable via HPO)
+classifier_dropout: 0.1  # Dropout for classification head
+hidden_dropout: 0.1      # Hidden layer dropout (injected into encoder config)
+attention_dropout: 0.1   # Attention dropout (injected into encoder config)
+
+# Model behavior
+freeze_backbone: false
+positive_threshold: 0.5
+
+# Loss configuration
+loss:
+  type: "focal"  # Options: focal, bce, weighted_bce
+  focal_gamma: 2.0  # Focusing parameter for focal loss (γ)
+  focal_alpha: null  # Auto-computed from class distribution if null
+
+# Classification head parameters (used when applicable)
+head_config:
+  num_attention_heads: 8  # For attention_pooling
+  intermediate_dim: null  # For mlp2, null means 2*hidden_size

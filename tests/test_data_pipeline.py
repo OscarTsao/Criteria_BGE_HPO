@@ -58,7 +58,7 @@ def test_load_and_preprocess_data_returns_expected_columns(tmp_path):
     cfg = _build_config(tmp_path)
     df = load_and_preprocess_data(cfg)
 
-    assert list(df.columns) == ["post_id", "post", "criterion_id", "criterion", "label"]
+    assert list(df.columns) == ["post_id", "post", "criterion_id", "criterion", "label", "evidence_text"]
     assert df["criterion"].iloc[0] == "Depressed mood most of the day."
     # Sanity-check that label column is coerced to integers
     assert df["label"].dtype == "int64"
@@ -76,7 +76,7 @@ def test_load_and_preprocess_data_supports_sampling(tmp_path):
 @pytest.mark.filterwarnings("ignore:Multiprocessing dataloaders")
 def test_create_dataloaders_falls_back_when_multiprocessing_unavailable(monkeypatch):
     """create_dataloaders should drop to num_workers=0 if multiprocessing fails."""
-    tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-v2-m3")
+    tokenizer = AutoTokenizer.from_pretrained("prajjwal1/bert-tiny")
     dataset = _make_dataset(tokenizer)
 
     monkeypatch.setattr(
@@ -94,4 +94,3 @@ def test_create_dataloaders_falls_back_when_multiprocessing_unavailable(monkeypa
 
     assert train_loader.num_workers == 0
     assert val_loader.num_workers == 0
-
